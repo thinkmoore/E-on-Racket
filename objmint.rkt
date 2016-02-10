@@ -34,16 +34,19 @@
   (and (integer? v)
        (not (negative? v))))
 
-(define/contract (make-mint)
-  (-> (fresh/c (obj/c
-                (∃ P :> (obj/c
-                         [getBalance (-> amount?)]
-                         [deposit    (-> amount? P void)]
-                         [sprout     (-> P)]))
-                [makePurse (-> amount? P)])))
-  (def mint
+(define (make-mint)
+  (def/ctc mint
+    ((∃ P :> (obj/c
+              [getBalance (-> amount?)]
+              [deposit    (-> amount? P void)]
+              [sprout     (-> P)]))
+     [makePurse (-> amount? P)])
     (to (makePurse balance)
-        (def purse
+        (def/ctc purse
+          ([getBalance (-> amount?)]
+           [deposit    (-> amount? any/c void)]
+           [sprout     (-> any/c)]
+           [deduct     (-> (and/c amount? (λ (a) (<= a balance))) void)])
           (to (getBalance) balance)
           (to (deposit amount src)
               (send src deduct amount)
@@ -51,8 +54,6 @@
           (to (sprout)
               (send mint makePurse 0))
           (to (deduct amount)
-              (unless (<= amount balance)
-                (error "insufficient funds"))
               (set! balance (- balance amount))))
         purse))
   mint)
