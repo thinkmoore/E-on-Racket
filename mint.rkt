@@ -102,7 +102,7 @@
 
 (define simpleAliceMint (make-simplemint))
 (define simpleAliceFakePurse (send simpleAliceMint makePurse 1000))
-(send simpleAliceMainPurse deposit 1000 simpleAliceFakePurse)
+;(send simpleAliceMainPurse deposit 1000 simpleAliceFakePurse)
 
 
 ;; def makeMint(name) :any {
