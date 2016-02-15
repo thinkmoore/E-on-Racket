@@ -11,17 +11,10 @@
                      syntax/parse/lib/function-header
                      racket))
 
-(struct obj ([methods #:mutable] [recvr #:mutable])
-  #:property prop:procedure
-  (λ (obj method . args)
-    (let ([fn (hash-ref (obj-methods obj) method (λ () #f))]
-          [r  (obj-recvr obj)])
-      (cond
-        [fn (apply fn args)]
-        [r  (apply r method args)]
-        [else (raise (make-exn:fail:contract:no-such-method
-                      (format "no such method: ~a~n" method)
-                      (current-continuation-marks)))]))))
+(struct obj (name [methods #:mutable] [recvr #:mutable])
+  #:methods gen:custom-write
+  [(define (write-proc obj port mode)
+     (write-string (format "#<obj: ~a>" (obj-name obj)) port))])
 
 (struct	exn:fail:contract:no-such-method exn:fail:contract ()
     #:extra-constructor-name
@@ -31,14 +24,31 @@
 (define (send obj method . args)
   (unless (obj? obj)
     (raise-argument-error 'send "obj?" 0 obj))
-  (apply obj method args))
+  (let ([fn (hash-ref (obj-methods obj) method (λ () #f))]
+        [r  (obj-recvr obj)])
+    (cond
+      [fn (apply fn args)]
+      [r  (apply (r method) args)]
+      [else (raise (make-exn:fail:contract:no-such-method
+                    (format "no such method: ~a~n" method)
+                    (current-continuation-marks)))])))
 
 (define (call obj method . args)
   (unless (obj? obj)
     (raise-argument-error 'call "obj?" 0 obj))
-  (apply obj method args))
+  (let ([fn (hash-ref (obj-methods obj) method (λ () #f))]
+        [r  (obj-recvr obj)])
+    (cond
+      [fn (apply fn args)]
+      [r  (apply (r method) args)]
+      [else (raise (make-exn:fail:contract:no-such-method
+                    (format "no such method: ~a~n" method)
+                    (current-continuation-marks)))])))
 
-(define (obj/c method-map recvr-ctc)
+(define-values (obj/c-prop obj/c? obj/c-accessor)
+  (make-impersonator-property 'obj/c))
+
+(define (obj/c method-map recvr-fn)
   (make-contract
    #:name 'obj/c
    #:first-order obj?
@@ -48,6 +58,8 @@
        (if (obj? obj)
            (impersonate-struct
             obj
+            set-obj-methods!
+            #f
             obj-methods
             (λ (obj methods)
               (impersonate-hash
@@ -56,23 +68,50 @@
                  (values method
                          (λ (hash method fn)
                            (let ([ctc (hash-ref method-map method (λ () #f))])
-                             (unless ctc
-                               (raise-blame-error
-                                (blame-swap blame) obj
-                                "cannot call hidden method: ~e" method))
-                             (((contract-projection ctc) blame) fn)))))
+                             (cond
+                               [ctc
+                                (((contract-projection ctc) blame) fn)]
+                               [recvr-fn
+                                (((contract-projection
+                                   (let ([ctc (recvr-fn method)])
+                                     (unless ctc
+                                       (raise-blame-error
+                                        (blame-swap blame) obj
+                                        "cannot call hidden method: ~e" method))
+                                     ctc)) blame) fn)]
+                               [else (raise-blame-error
+                                      (blame-swap blame) obj
+                                      "cannot call hidden method: ~e" method)])))))
                (λ (hash key value) (values key value))
                (λ (hash key) key)
                (λ (hash key) key)))
-            set-obj-methods!
+            set-obj-recvr!
             #f
             obj-recvr
             (λ (obj recvr)
               (if recvr
-                  (((contract-projection recvr-ctc) blame) recvr)
+                  (((contract-projection
+                     (if recvr-fn
+                         (->i ([method symbol?]) [result (method)
+                                                         (let ([ctc (recvr-fn method)])
+                                                           (unless ctc
+                                                             (raise-blame-error
+                                                              (blame-swap blame) obj
+                                                              "cannot call hidden method: ~e" method))
+                                                           ctc)])
+                         (->i ([method symbol?]) [result (method)
+                                                         (make-contract
+                                                          #:name 'hidden
+                                                          #:first-order procedure?
+                                                          #:projection
+                                                          (λ (blame)
+                                                            (λ (val)
+                                                              (raise-blame-error
+                                                               (blame-swap blame) obj
+                                                               "cannot call hidden method: ~e" method))))])))
+                    blame) recvr)
                   #f))
-           set-obj-recvr!
-           #f)
+            obj/c-prop #t)
            (raise-blame-error
             blame obj
             '(expected "an object" given: "~e")
@@ -87,7 +126,7 @@
   (define-syntax-class recv
     #:datum-literals (recv)
     (pattern (recv (n args) body ...+)
-             #:attr defn #'(define (recvr n . args) body ...)))
+             #:attr defn #'(define (recvr n) (λ args body ...))))
   (define-syntax-class quantifier
     #:datum-literals (∀ ∃ :>)
     (pattern (∀ v:id :> bound:expr)
@@ -115,7 +154,9 @@
                  (hash-set! hash k v))
                hash))
            r.defn
-           (obj methods recvr)))]))
+           (obj (quote name) methods recvr)))]
+    [(_ header:function-header body ...+)
+     #`(def header.name (to (run #,@#'header.args) body ...))]))
 
 (define-syntax (def/ctc stx)
   (syntax-parse stx
@@ -125,7 +166,11 @@
          (fresh/c (_obj/c ctc ...))
          (let ()
            (def name body ...)
-           name))]))
+           name))]
+    [(_ header:function-header ctc:expr body ...+)
+     #'(def/ctc header.name
+         ([run ctc])
+         (to (run #,@#'header.args) body ...))]))
 
 (define-syntax (_obj/c stx)
   (syntax-parse stx
@@ -149,6 +194,18 @@
               (hash-set! hash k v))
             (obj/c hash #f))))]))
 
+(define opaque/c (_obj/c))
+
+(define-syntax (fresh/c stx)
+  (syntax-parse stx
+    [(_ ctc:expr)
+     #`(make-contract
+        #:name 'fresh/c
+        #:projection
+        (λ (blame)
+          (λ (value)
+            (((contract-projection ctc) blame) value))))]))
+
 (module* test racket
   (require rackunit)
   (require (submod ".."))
@@ -168,6 +225,38 @@
             [(eq? name 'foo) 'done]
             [else (error "bad method")])))
 
+  (define/contract obj1-def/c
+    (obj/c
+     [hello (-> integer?)]
+     [world (-> symbol?)])
+    (let ()
+      (def obj
+        (to (hello) 0)
+        (to (world) 1)
+        (to (add n m) (+ n m)))
+      obj))
+
+  (define/contract obj2-def/c
+    (obj/c
+     [hello (-> integer?)]
+     [world (-> integer?)]
+     [add   (-> integer? integer? integer?)]
+     [recv  (λ (method)
+              (cond
+                [(eq? method 'test) #f]
+                [else (-> symbol?)]))])
+    (let ()
+      (def obj
+        (to (hello) 0)
+        (to (world) 1)
+        (to (add n m) (+ n m))
+        (recv (name args)
+              (cond
+                [(eq? name 'test) 0]
+                [(eq? name 'foo) 'done]
+                [else (error "bad method")])))
+      obj))
+  
   (def/ctc obj1-c
     ([hello (-> integer?)]
      [world (-> symbol?)])
@@ -179,7 +268,10 @@
     ([hello (-> integer?)]
      [world (-> integer?)]
      [add   (-> integer? integer? integer?)]
-     [recv  (->i ([method (λ (n) (not (eq? n 'test)))]) #:rest [args any/c] [result () symbol?])])
+     [recv  (λ (method)
+              (cond
+                [(eq? method 'test) #f]
+                [else (-> symbol?)]))])
     (to (hello) 0)
     (to (world) 1)
     (to (add n m) (+ n m))
@@ -219,42 +311,22 @@
   (check-not-exn (λ () (call obj2-c 'world)))
   (check-not-exn (λ () (call obj2-c 'add 1 2)))
   (check-exn exn:fail:contract? (λ () (call obj2-c 'test)))
-  (check-not-exn (λ () (call obj2-c 'foo))))
+  (check-not-exn (λ () (call obj2-c 'foo)))
 
-(define opaque/c (_obj/c))
+  (check-not-exn (λ () (send obj1-def/c hello)))
+  (check-exn exn:fail:contract? (λ () (send obj1-def/c world)))
+  (check-exn exn:fail:contract? (λ () (send obj1-def/c add 1 2)))
+  (check-not-exn (λ () (send obj2-def/c hello)))
+  (check-not-exn (λ () (send obj2-def/c world)))
+  (check-not-exn (λ () (send obj2-def/c add 1 2)))
+  (check-exn exn:fail:contract? (λ () (send obj2-def/c test)))
+  (check-not-exn (λ () (send obj2-def/c foo)))
 
-(define-syntax (fresh/c stx)
-  (syntax-parse stx
-    [(_ ctc:expr)
-     #`(make-contract
-        #:name 'fresh/c
-        #:projection
-        (λ (blame)
-          (λ (value)
-            (((contract-projection (begin (printf "creating contract ~e~n" ctc) ctc)) blame) value))))]))
-
-(define/contract test
-  (_obj/c
-   (∃ X :> opaque/c)
-   [make (-> integer? X)]
-   [read (-> X integer?)])
-  (let ()
-    (def obj
-      (to (make i)
-          (def int
-            (to (get) i))
-          int)
-      (to (read i)
-          (_send i get)))
-    obj))
-
-(define test2
-  (let ()
-    (def obj
-      (to (make i)
-          (def int
-            (to (get) i))
-          int)
-      (to (read i)
-          (_send i get)))
-    obj))
+  (check-not-exn (λ () (call obj1-def/c 'hello)))
+  (check-exn exn:fail:contract? (λ () (call obj1-def/c 'world)))
+  (check-exn exn:fail:contract? (λ () (call obj1-def/c 'add 1 2)))
+  (check-not-exn (λ () (call obj2-def/c 'hello)))
+  (check-not-exn (λ () (call obj2-def/c 'world)))
+  (check-not-exn (λ () (call obj2-def/c 'add 1 2)))
+  (check-exn exn:fail:contract? (λ () (call obj2-def/c 'test)))
+  (check-not-exn (λ () (call obj2-def/c 'foo))))

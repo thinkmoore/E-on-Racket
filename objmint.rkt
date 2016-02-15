@@ -1,12 +1,10 @@
-#lang racket
-
-(require "object.rkt")
+#lang E-on-Racket
 
 ;; def makeMint(name) :any {
 ;;     def [sealer, unsealer] := makeBrandPair(name)
 ;;     def mint {
 ;;         to __printOn(out) :void { out.print(`<$name's mint>`) }
- 
+;;
 ;;         to makePurse(var balance :(int >= 0)) :any {
 ;;             def decr(amount :(0..balance)) :void {
 ;;                 balance -= amount
@@ -18,7 +16,7 @@
 ;;                 to getBalance() :int { return balance }
 ;;                 to sprout()     :any { return mint.makePurse(0) }
 ;;                 to getDecr()    :any { return sealer.seal(decr) }
-
+;;
 ;;                 to deposit(amount :int, src) :void {
 ;;                     unsealer.unseal(src.getDecr())(amount)
 ;;                     balance += amount
@@ -34,7 +32,7 @@
   (and (integer? v)
        (not (negative? v))))
 
-(define (make-mint)
+(def (make-mint)
   (def/ctc mint
     ((∃ P :> (obj/c
               [getBalance (-> amount?)]
@@ -64,6 +62,8 @@
 (define paymentForBob (send aliceMainPurse sprout))
 (send paymentForBob deposit 100 aliceMainPurse)
 
-(define aliceMint (make-mint))
+(define aliceMint (send make-mint run))
 (define aliceFakePurse (send aliceMint makePurse 1000))
-(send aliceMainPurse deposit 1000 aliceFakePurse)
+
+;(send aliceMainPurse deposit 1000 aliceFakePurse)
+
