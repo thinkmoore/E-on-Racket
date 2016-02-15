@@ -36,15 +36,13 @@
   (def/ctc mint
     ((∃ P :> (obj/c
               [getBalance (-> amount?)]
-              [deposit    (-> amount? P void)]
+              [deposit    (->i ([amount amount?]
+                                [purse (amount) (and/c P (λ (p) (<= amount (send p getBalance))))])
+                               [result void])]
               [sprout     (-> P)]))
      [makePurse (-> amount? P)])
     (to (makePurse balance)
-        (def/ctc purse
-          ([getBalance (-> amount?)]
-           [deposit    (-> amount? any/c void)]
-           [sprout     (-> any/c)]
-           [deduct     (-> (and/c amount? (λ (a) (<= a balance))) void)])
+        (def purse
           (to (getBalance) balance)
           (to (deposit amount src)
               (send src deduct amount)
